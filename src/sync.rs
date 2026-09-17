@@ -184,10 +184,7 @@ pub fn run(dry_run: bool) -> Result<()> {
                 }
                 match sync_marked_up_copy(&zotero, remarkable, &library, &attachment_key, remote) {
                     Ok(()) => {
-                        println!(
-                            "synced marked-up copy back to Zotero: {}",
-                            remote.file_name
-                        );
+                        println!("synced marked-up copy back to Zotero: {}", remote.file_name);
                         if let Some(saved) = lib.remarkable_docs.get_mut(&attachment_key) {
                             saved.last_hash = remote.hash.clone();
                         }
@@ -334,7 +331,8 @@ fn ensure_folder_path(
         let folder_id = match index.by_parent_and_name.get(&key) {
             Some(existing) => existing.clone(),
             None => {
-                let created = remarkable.create_folder(part, (!parent.is_empty()).then_some(&parent))?;
+                let created =
+                    remarkable.create_folder(part, (!parent.is_empty()).then_some(&parent))?;
                 index.by_parent_and_name.insert(key, created.id.clone());
                 if !created.id.is_empty() {
                     index.docs_by_id.insert(created.id.clone(), created.clone());
