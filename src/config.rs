@@ -6,6 +6,8 @@ use serde::Deserialize;
 
 const DEFAULT_REMARKABLE_AUTH_HOST: &str = "https://webapp-prod.cloud.remarkable.engineering";
 const DEFAULT_REMARKABLE_UPLOAD_HOST: &str = "https://internal.cloud.remarkable.com";
+const DEFAULT_REMARKABLE_STORAGE_HOST: &str =
+    "https://document-storage-production-dot-remarkable-production.appspot.com";
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -23,6 +25,9 @@ pub struct Config {
     /// Optional: override the reMarkable upload host (for rmfakecloud, etc.).
     #[serde(default)]
     pub remarkable_upload_host: Option<String>,
+    /// Optional: override the reMarkable document storage host.
+    #[serde(default)]
+    pub remarkable_storage_host: Option<String>,
 }
 
 impl Config {
@@ -45,6 +50,7 @@ impl Config {
 pub struct RemarkableEndpoints {
     pub auth_host: String,
     pub upload_host: String,
+    pub storage_host: String,
 }
 
 pub fn remarkable_endpoints() -> Result<RemarkableEndpoints> {
@@ -62,6 +68,10 @@ pub fn remarkable_endpoints() -> Result<RemarkableEndpoints> {
         upload_host: normalize_endpoint(
             config.remarkable_upload_host,
             DEFAULT_REMARKABLE_UPLOAD_HOST,
+        ),
+        storage_host: normalize_endpoint(
+            config.remarkable_storage_host,
+            DEFAULT_REMARKABLE_STORAGE_HOST,
         ),
     })
 }
@@ -129,6 +139,7 @@ zotero_group_ids = []
 # Optional: override reMarkable endpoints (for rmfakecloud, etc.).
 # remarkable_auth_host = \"https://webapp-prod.cloud.remarkable.engineering\"
 # remarkable_upload_host = \"https://internal.cloud.remarkable.com\"
+# remarkable_storage_host = \"https://document-storage-production-dot-remarkable-production.appspot.com\"
 ";
 
 pub fn init() -> Result<()> {
