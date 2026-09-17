@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use reqwest::StatusCode;
@@ -44,6 +44,8 @@ pub struct ItemData {
     pub date: Option<String>,
     #[serde(default)]
     pub creators: Vec<Creator>,
+    #[serde(default)]
+    pub collections: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +56,20 @@ pub struct Creator {
     /// Single-field creator names (e.g. institutions).
     #[serde(default)]
     pub name: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionData {
+    pub name: String,
+    #[serde(default)]
+    pub parent_collection: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct Collection {
+    pub key: String,
+    pub data: CollectionData,
 }
 
 impl Zotero {
@@ -69,6 +85,13 @@ impl Zotero {
     fn get(&self, library: &str, path_and_query: &str) -> RequestBuilder {
         self.client
             .get(format!("{API}/{library}/{path_and_query}"))
+            .header("Zotero-API-Key", &self.api_key)
+            .header("Zotero-API-Version", "3")
+    }
+
+    fn post(&self, library: &str, path: &str) -> RequestBuilder {
+        self.client
+            .post(format!("{API}/{library}/{path}"))
             .header("Zotero-API-Key", &self.api_key)
             .header("Zotero-API-Version", "3")
     }
@@ -169,6 +192,28 @@ impl Zotero {
             .json()?)
     }
 
+    pub fn collections(&self, library: &str) -> Result<Vec<Collection>> {
+        let mut collections: Vec<Collection> = Vec::new();
+        let mut start = 0;
+        loop {
+            let response = self
+                .send(self.get(
+                    library,
+                    &format!("collections?limit={PAGE_SIZE}&start={start}"),
+                ))?
+                .error_for_status()
+                .with_context(|| format!("could not list Zotero collections for {library}"))?;
+            let batch: Vec<Collection> = response.json()?;
+            let done = batch.len() < PAGE_SIZE;
+            start += batch.len();
+            collections.extend(batch);
+            if done {
+                break;
+            }
+        }
+        Ok(collections)
+    }
+
     /// Download an attachment's file content (follows the redirect to storage).
     /// Returns `None` when Zotero has no file stored for the attachment (404):
     /// the item exists but its PDF was never uploaded to Zotero's cloud, so
@@ -182,6 +227,76 @@ impl Zotero {
             .error_for_status()
             .with_context(|| format!("could not download attachment {library}/{key}"))?;
         Ok(Some(response.bytes()?.to_vec()))
+    }
+
+    pub fn upload_attachment_pdf(
+        &self,
+        library: &str,
+        key: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let md5 = format!("{:x}", md5::compute(bytes));
+        let mtime = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0))
+            .as_millis();
+
+        let auth_resp = self
+            .send(
+                self.post(library, &format!("items/{key}/file"))
+                    .header("If-None-Match", "*")
+                    .form(&[
+                        ("md5", md5.clone()),
+                        ("filename", filename.to_string()),
+                        ("filesize", bytes.len().to_string()),
+                        ("mtime", mtime.to_string()),
+                    ]),
+            )?
+            .error_for_status()
+            .with_context(|| format!("could not authorize Zotero upload for {library}/{key}"))?;
+
+        if auth_resp.status() == StatusCode::NO_CONTENT {
+            return Ok(());
+        }
+
+        let auth: serde_json::Value = auth_resp.json()?;
+        let url = auth["url"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing upload URL in Zotero auth response"))?;
+        let content_type = auth["contentType"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing contentType in Zotero auth response"))?;
+        let prefix = auth["prefix"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing prefix in Zotero auth response"))?;
+        let suffix = auth["suffix"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing suffix in Zotero auth response"))?;
+        let upload_key = auth["uploadKey"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing uploadKey in Zotero auth response"))?;
+
+        let mut body = Vec::with_capacity(prefix.len() + bytes.len() + suffix.len());
+        body.extend_from_slice(prefix.as_bytes());
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(suffix.as_bytes());
+        self.client
+            .post(url)
+            .header("content-type", content_type)
+            .body(body)
+            .send()?
+            .error_for_status()
+            .context("Zotero storage upload failed")?;
+
+        self.send(
+            self.post(library, &format!("items/{key}/file"))
+                .header("If-None-Match", "*")
+                .form(&[("upload", upload_key)]),
+        )?
+        .error_for_status()
+        .with_context(|| format!("could not finalize Zotero upload for {library}/{key}"))?;
+        Ok(())
     }
 }
 

@@ -12,8 +12,11 @@ no cable plugged in — ideal for running on a schedule in the background.
 
 - **Incremental.** Only items changed since the last run are fetched (via the
   Zotero `since` parameter), so a large library syncs in a single fast request.
-- **No duplicates.** Each attachment is uploaded exactly once; later metadata
-  edits in Zotero never create a second copy on the tablet.
+- **Two-way sync.** New PDFs go from Zotero to reMarkable, and when a synced
+  document changes on reMarkable, the updated PDF package is pushed back to
+  the same Zotero attachment.
+- **Folder mirroring.** reMarkable folders are created to match the Zotero
+  collection path (using the first collection on the parent item).
 - **Multi-library.** Syncs your personal library and any number of group
   libraries.
 - **Nice filenames.** Papers arrive as `Author - Year - Title` instead of
@@ -106,8 +109,9 @@ Open <https://www.zotero.org/settings/keys> (log in with your Zotero account).
 - **User ID** — near the top the page shows *"Your userID for use in API calls
   is `1234567`"*. Copy that number.
 - **API key** — click **Create new private key**, give it a name (e.g.
-  `zoterable`), tick **Allow library access** (read-only is all that's needed),
-  and save. Zotero shows the key **once** — copy it immediately.
+  `zoterable`), tick **Allow library access**, and enable write access if you
+  want marked-up reMarkable copies synced back into Zotero. Zotero shows the
+  key **once** — copy it immediately.
 
 Put both into the config file:
 
@@ -121,6 +125,7 @@ If you use rmfakecloud (or another custom reMarkable backend), you can also set:
 ```toml
 remarkable_auth_host = "https://your-auth-host"
 remarkable_upload_host = "https://your-upload-host"
+remarkable_storage_host = "https://your-storage-host"
 ```
 
 If omitted, zoterable uses the official reMarkable endpoints.
@@ -179,14 +184,13 @@ zoterable sync --dry-run  # show what would be uploaded, without uploading
 | `zoterable init` | Create the config template and print setup instructions. |
 | `zoterable pair <code>` | Register with the reMarkable cloud using a one-time code. |
 | `zoterable baseline` | Mark all current PDFs as already synced (uploads nothing). |
-| `zoterable sync` | Upload PDFs added since the last sync. |
+| `zoterable sync` | Push new PDFs to reMarkable, mirror Zotero folders, and pull changed reMarkable docs back into Zotero. |
 | `zoterable sync --dry-run` | List what a sync *would* upload. |
 
 Run `zoterable help` or `zoterable <command> --help` for details.
 
-Uploaded PDFs land in the **root folder** of your reMarkable (see
-[Limitations](#limitations)). Linked-file attachments and items whose PDF isn't
-stored in Zotero's cloud are skipped automatically.
+Linked-file attachments and items whose PDF isn't stored in Zotero's cloud are
+skipped automatically.
 
 ---
 
@@ -283,7 +287,7 @@ All state is kept in a single per-user directory:
 |---|---|
 | `config.toml` | Your Zotero user ID, API key, and group IDs. |
 | `remarkable-device-token` | The long-lived reMarkable pairing token. |
-| `state.json` | Per-library sync watermarks and the set of uploaded attachments. |
+| `state.json` | Per-library sync watermarks, uploaded attachments, and reMarkable document mappings. |
 
 Delete `state.json` to force zoterable to reconsider your whole library on the
 next sync (it won't re-upload things already on the tablet unless you also want
@@ -323,9 +327,6 @@ then run `zoterable sync`.
 
 ## Limitations
 
-- **Root folder only.** The simple reMarkable upload endpoint used here cannot
-  place files into a specific folder, so everything lands in the tablet's root.
-  You can move them into folders on the device afterwards.
 - **Unofficial reMarkable API.** reMarkable does not publish or support this API;
   a change on their side could break uploads until zoterable is updated.
 - **PDFs only.** Non-PDF attachments and linked (not imported) files are skipped.

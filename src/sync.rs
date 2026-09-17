@@ -1,13 +1,22 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Cursor, Read};
 use std::path::Path;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use zip::ZipArchive;
 
 use crate::config;
-use crate::remarkable::Remarkable;
-use crate::zotero::{Item, Zotero};
+use crate::remarkable::{FileEntry, Remarkable};
+use crate::zotero::{Collection, Item, Zotero};
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct RemarkableDocState {
+    doc_id: String,
+    #[serde(default)]
+    last_hash: String,
+}
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct LibraryState {
@@ -18,6 +27,9 @@ struct LibraryState {
     /// Zotero attachment key -> item version at last successful upload.
     #[serde(default)]
     synced: HashMap<String, u64>,
+    /// Zotero attachment key -> reMarkable cloud document details.
+    #[serde(default)]
+    remarkable_docs: HashMap<String, RemarkableDocState>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -31,6 +43,18 @@ struct State {
     last_library_version: u64,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     synced: HashMap<String, u64>,
+}
+
+#[derive(Default)]
+struct FolderIndex {
+    by_parent_and_name: HashMap<(String, String), String>,
+    docs_by_id: HashMap<String, FileEntry>,
+}
+
+#[derive(Default)]
+struct ItemPlacement {
+    name: String,
+    folder_path: Vec<String>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -58,6 +82,23 @@ impl State {
     }
 }
 
+impl FolderIndex {
+    fn from_files(files: Vec<FileEntry>) -> Self {
+        let mut index = Self::default();
+        for file in files {
+            if is_folder(&file) {
+                index.by_parent_and_name.insert(
+                    (file.parent.clone(), file.file_name.clone()),
+                    file.id.clone(),
+                );
+            } else {
+                index.docs_by_id.insert(file.id.clone(), file);
+            }
+        }
+        index
+    }
+}
+
 pub fn run(dry_run: bool) -> Result<()> {
     let cfg = config::load()?;
     let zotero = Zotero::new(&cfg.zotero_api_key);
@@ -66,10 +107,17 @@ pub fn run(dry_run: bool) -> Result<()> {
     let mut state = State::load(&state_path, &cfg.user_library());
 
     let mut remarkable: Option<Remarkable> = None;
+    let mut folder_index: Option<FolderIndex> = None;
     let mut failures = 0usize;
 
     for library in cfg.libraries() {
         let mut lib = state.libraries.get(&library).cloned().unwrap_or_default();
+        let collections_by_key: HashMap<String, Collection> = zotero
+            .collections(&library)?
+            .into_iter()
+            .map(|collection| (collection.key.clone(), collection))
+            .collect();
+
         println!(
             "[{library}] fetching PDF attachments changed since library version {}…",
             lib.last_library_version
@@ -78,9 +126,8 @@ pub fn run(dry_run: bool) -> Result<()> {
             zotero.pdf_attachments(&library, lib.last_library_version)?;
 
         // Only never-seen attachments are uploaded. Re-uploading a known key
-        // would create a duplicate document on the reMarkable (the upload
-        // endpoint has no replace semantics), so metadata-only edits just
-        // refresh the record.
+        // would create a duplicate document on the reMarkable, so metadata-only
+        // edits just refresh the record.
         let (new, updated): (Vec<&Item>, Vec<&Item>) = attachments
             .iter()
             .partition(|item| !lib.synced.contains_key(&item.key));
@@ -93,7 +140,16 @@ pub fn run(dry_run: bool) -> Result<()> {
 
         if dry_run {
             for item in new {
-                println!("would upload: {}", display_name(&zotero, &library, item));
+                let placement = item_placement(&zotero, &library, item, &collections_by_key);
+                if placement.folder_path.is_empty() {
+                    println!("would upload: {}", placement.name);
+                } else {
+                    println!(
+                        "would upload: {} (folder: {})",
+                        placement.name,
+                        placement.folder_path.join("/")
+                    );
+                }
             }
             continue;
         }
@@ -103,20 +159,66 @@ pub fn run(dry_run: bool) -> Result<()> {
         }
 
         let mut lib_failures = 0usize;
+        if !lib.remarkable_docs.is_empty() {
+            let remarkable = match &remarkable {
+                Some(r) => r,
+                None => remarkable.insert(Remarkable::connect()?),
+            };
+            if folder_index.is_none() {
+                folder_index = Some(FolderIndex::from_files(remarkable.list_files()?));
+            }
+            let Some(index) = folder_index.as_ref() else {
+                bail!("folder index unexpectedly missing");
+            };
+            let tracked: Vec<(String, RemarkableDocState)> = lib
+                .remarkable_docs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for (attachment_key, tracked_doc) in tracked {
+                let Some(remote) = index.docs_by_id.get(&tracked_doc.doc_id) else {
+                    continue;
+                };
+                if remote.hash.is_empty() || remote.hash == tracked_doc.last_hash {
+                    continue;
+                }
+                match sync_marked_up_copy(&zotero, remarkable, &library, &attachment_key, remote) {
+                    Ok(()) => {
+                        println!(
+                            "synced marked-up copy back to Zotero: {}",
+                            remote.file_name
+                        );
+                        if let Some(saved) = lib.remarkable_docs.get_mut(&attachment_key) {
+                            saved.last_hash = remote.hash.clone();
+                        }
+                        state.libraries.insert(library.clone(), lib.clone());
+                        state.save(&state_path)?;
+                    }
+                    Err(err) => {
+                        lib_failures += 1;
+                        eprintln!(
+                            "FAILED syncing marked-up copy for attachment {}: {err:#}",
+                            attachment_key
+                        );
+                    }
+                }
+            }
+        }
+
         for item in new {
-            let name = display_name(&zotero, &library, item);
+            let placement = item_placement(&zotero, &library, item, &collections_by_key);
             let bytes = match zotero.download(&library, &item.key) {
                 Ok(Some(bytes)) => bytes,
                 // No file in Zotero storage — nothing to upload. Not recorded
                 // as synced, so it is retried automatically if the PDF is
                 // later uploaded to Zotero (its item version will change).
                 Ok(None) => {
-                    eprintln!("skipped (no PDF stored in Zotero yet): {name}");
+                    eprintln!("skipped (no PDF stored in Zotero yet): {}", placement.name);
                     continue;
                 }
                 Err(err) => {
                     lib_failures += 1;
-                    eprintln!("FAILED: {name}: {err:#}");
+                    eprintln!("FAILED: {}: {err:#}", placement.name);
                     continue;
                 }
             };
@@ -124,16 +226,33 @@ pub fn run(dry_run: bool) -> Result<()> {
                 Some(r) => r,
                 None => remarkable.insert(Remarkable::connect()?),
             };
-            match remarkable.upload_pdf(&name, bytes) {
-                Ok(()) => {
-                    println!("uploaded: {name}");
+            if folder_index.is_none() {
+                folder_index = Some(FolderIndex::from_files(remarkable.list_files()?));
+            }
+            let Some(index) = folder_index.as_mut() else {
+                bail!("folder index unexpectedly missing");
+            };
+            let parent = ensure_folder_path(remarkable, index, &placement.folder_path)?;
+            match remarkable.upload_pdf(&placement.name, bytes, parent.as_deref()) {
+                Ok(uploaded) => {
+                    println!("uploaded: {}", placement.name);
                     lib.synced.insert(item.key.clone(), item.version);
+                    lib.remarkable_docs.insert(
+                        item.key.clone(),
+                        RemarkableDocState {
+                            doc_id: uploaded.id.clone(),
+                            last_hash: uploaded.hash.clone(),
+                        },
+                    );
+                    if !uploaded.id.is_empty() {
+                        index.docs_by_id.insert(uploaded.id.clone(), uploaded);
+                    }
                     state.libraries.insert(library.clone(), lib.clone());
                     state.save(&state_path)?;
                 }
                 Err(err) => {
                     lib_failures += 1;
-                    eprintln!("FAILED: {name}: {err:#}");
+                    eprintln!("FAILED: {}: {err:#}", placement.name);
                 }
             }
         }
@@ -149,7 +268,7 @@ pub fn run(dry_run: bool) -> Result<()> {
     }
 
     if failures > 0 {
-        bail!("{failures} upload(s) failed — they will be retried on the next sync");
+        bail!("{failures} sync step(s) failed — they will be retried on the next run");
     }
     Ok(())
 }
@@ -184,9 +303,61 @@ pub fn baseline() -> Result<()> {
     Ok(())
 }
 
-/// Build "Author - Year - Title" from the attachment's parent item, falling
-/// back to the attachment's own filename when there is no usable parent.
-fn display_name(zotero: &Zotero, library: &str, item: &Item) -> String {
+fn sync_marked_up_copy(
+    zotero: &Zotero,
+    remarkable: &Remarkable,
+    library: &str,
+    attachment_key: &str,
+    remote: &FileEntry,
+) -> Result<()> {
+    let zip_bytes = remarkable.download_zip(&remote.id)?;
+    let pdf = pdf_from_zip(&zip_bytes, &remote.id)?;
+    let mut name = remote.file_name.trim().to_string();
+    if !name.to_ascii_lowercase().ends_with(".pdf") {
+        name.push_str(".pdf");
+    }
+    zotero.upload_attachment_pdf(library, attachment_key, &name, &pdf)?;
+    Ok(())
+}
+
+fn ensure_folder_path(
+    remarkable: &Remarkable,
+    index: &mut FolderIndex,
+    folder_path: &[String],
+) -> Result<Option<String>> {
+    if folder_path.is_empty() {
+        return Ok(None);
+    }
+    let mut parent = String::new();
+    for part in folder_path {
+        let key = (parent.clone(), part.clone());
+        let folder_id = match index.by_parent_and_name.get(&key) {
+            Some(existing) => existing.clone(),
+            None => {
+                let created = remarkable.create_folder(part, (!parent.is_empty()).then_some(&parent))?;
+                index.by_parent_and_name.insert(key, created.id.clone());
+                if !created.id.is_empty() {
+                    index.docs_by_id.insert(created.id.clone(), created.clone());
+                }
+                created.id
+            }
+        };
+        parent = folder_id;
+    }
+    Ok((!parent.is_empty()).then_some(parent))
+}
+
+fn is_folder(file: &FileEntry) -> bool {
+    let kind = file.entry_type.to_ascii_lowercase();
+    kind == "collectiontype" || kind == "folder"
+}
+
+fn item_placement(
+    zotero: &Zotero,
+    library: &str,
+    item: &Item,
+    collections_by_key: &HashMap<String, Collection>,
+) -> ItemPlacement {
     let fallback = item
         .data
         .filename
@@ -196,10 +367,16 @@ fn display_name(zotero: &Zotero, library: &str, item: &Item) -> String {
     let fallback = sanitize(fallback.trim_end_matches(".pdf").trim_end_matches(".PDF"));
 
     let Some(parent_key) = &item.data.parent_item else {
-        return fallback;
+        return ItemPlacement {
+            name: fallback,
+            folder_path: vec![],
+        };
     };
     let Ok(parent) = zotero.item(library, parent_key) else {
-        return fallback;
+        return ItemPlacement {
+            name: fallback,
+            folder_path: vec![],
+        };
     };
 
     let mut parts: Vec<String> = Vec::new();
@@ -221,12 +398,52 @@ fn display_name(zotero: &Zotero, library: &str, item: &Item) -> String {
     if let Some(title) = parent.data.title.as_deref().filter(|t| !t.is_empty()) {
         parts.push(title.to_string());
     }
+    let folder_path = collection_path(&parent, collections_by_key);
 
-    if parts.is_empty() {
-        fallback
-    } else {
-        sanitize(&parts.join(" - "))
+    ItemPlacement {
+        name: if parts.is_empty() {
+            fallback
+        } else {
+            sanitize(&parts.join(" - "))
+        },
+        folder_path,
     }
+}
+
+fn collection_path(parent: &Item, collections_by_key: &HashMap<String, Collection>) -> Vec<String> {
+    let Some(collection_key) = parent.data.collections.first() else {
+        return vec![];
+    };
+    let mut path: Vec<String> = Vec::new();
+    let mut current = Some(collection_key.as_str());
+    while let Some(key) = current {
+        let Some(collection) = collections_by_key.get(key) else {
+            break;
+        };
+        path.push(sanitize(&collection.data.name));
+        current = collection.data.parent_collection.as_deref();
+    }
+    path.reverse();
+    path
+}
+
+fn pdf_from_zip(zip_bytes: &[u8], doc_id: &str) -> Result<Vec<u8>> {
+    let mut zip = ZipArchive::new(Cursor::new(zip_bytes))?;
+    let direct_name = format!("{doc_id}.pdf");
+    if let Ok(mut file) = zip.by_name(&direct_name) {
+        let mut out = Vec::new();
+        file.read_to_end(&mut out)?;
+        return Ok(out);
+    }
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i)?;
+        if file.name().to_ascii_lowercase().ends_with(".pdf") {
+            let mut out = Vec::new();
+            file.read_to_end(&mut out)?;
+            return Ok(out);
+        }
+    }
+    bail!("downloaded reMarkable archive did not contain a PDF file")
 }
 
 /// First run of four consecutive digits, e.g. "2023" from "2023-05-01".
