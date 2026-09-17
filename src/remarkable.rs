@@ -24,7 +24,10 @@ pub fn pair(code: &str) -> Result<()> {
     let token = response.text()?;
     let path = config::device_token_path()?;
     fs::write(&path, &token)?;
-    println!("Paired with the reMarkable cloud (token stored in {}).", path.display());
+    println!(
+        "Paired with the reMarkable cloud (token stored in {}).",
+        path.display()
+    );
     Ok(())
 }
 
@@ -40,7 +43,10 @@ impl Remarkable {
         let endpoints = config::remarkable_endpoints()?;
         let path = config::device_token_path()?;
         let device_token = fs::read_to_string(&path).with_context(|| {
-            format!("cannot read {} — run `zoterable pair <code>` first", path.display())
+            format!(
+                "cannot read {} — run `zoterable pair <code>` first",
+                path.display()
+            )
         })?;
         let client = Client::new();
         let session_token = client

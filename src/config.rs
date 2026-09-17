@@ -29,7 +29,11 @@ impl Config {
     /// API path prefixes of all libraries to sync ("users/…" and "groups/…").
     pub fn libraries(&self) -> Vec<String> {
         let mut libraries = vec![self.user_library()];
-        libraries.extend(self.zotero_group_ids.iter().map(|id| format!("groups/{id}")));
+        libraries.extend(
+            self.zotero_group_ids
+                .iter()
+                .map(|id| format!("groups/{id}")),
+        );
         libraries
     }
 
@@ -45,8 +49,12 @@ pub struct RemarkableEndpoints {
 
 pub fn remarkable_endpoints() -> Result<RemarkableEndpoints> {
     let path = config_path()?;
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("cannot read {} — run `zoterable init` first", path.display()))?;
+    let raw = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "cannot read {} — run `zoterable init` first",
+            path.display()
+        )
+    })?;
     let config: Config =
         toml::from_str(&raw).with_context(|| format!("invalid config at {}", path.display()))?;
     Ok(RemarkableEndpoints {
@@ -90,8 +98,12 @@ pub fn state_path() -> Result<PathBuf> {
 
 pub fn load() -> Result<Config> {
     let path = config_path()?;
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("cannot read {} — run `zoterable init` first", path.display()))?;
+    let raw = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "cannot read {} — run `zoterable init` first",
+            path.display()
+        )
+    })?;
     let config: Config =
         toml::from_str(&raw).with_context(|| format!("invalid config at {}", path.display()))?;
     if config.zotero_user_id.is_empty() || config.zotero_api_key.is_empty() {
@@ -115,8 +127,8 @@ zotero_api_key = \"\"
 zotero_group_ids = []
 
 # Optional: override reMarkable endpoints (for rmfakecloud, etc.).
-# remarkable_auth_host = "https://webapp-prod.cloud.remarkable.engineering"
-# remarkable_upload_host = "https://internal.cloud.remarkable.com"
+# remarkable_auth_host = \"https://webapp-prod.cloud.remarkable.engineering\"
+# remarkable_upload_host = \"https://internal.cloud.remarkable.com\"
 ";
 
 pub fn init() -> Result<()> {
@@ -129,7 +141,9 @@ pub fn init() -> Result<()> {
     }
     println!();
     println!("Next steps:");
-    println!("  1. Create an API key at https://www.zotero.org/settings/keys and fill in the config.");
+    println!(
+        "  1. Create an API key at https://www.zotero.org/settings/keys and fill in the config."
+    );
     println!("  2. Get a one-time code at https://my.remarkable.com/device/browser/connect");
     println!("     and run `zoterable pair <code>` (codes expire after a few minutes).");
     println!("  3. Run `zoterable sync`.");

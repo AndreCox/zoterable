@@ -7,7 +7,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "zoterable", version, about = "Sync Zotero PDF attachments to a reMarkable tablet")]
+#[command(
+    name = "zoterable",
+    version,
+    about = "Sync Zotero PDF attachments to a reMarkable tablet"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
