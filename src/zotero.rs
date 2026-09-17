@@ -102,9 +102,7 @@ impl Zotero {
                 || status == StatusCode::SERVICE_UNAVAILABLE;
             if rate_limited && attempt < MAX_RETRIES {
                 let wait = header_secs(&response, "retry-after").unwrap_or(1);
-                eprintln!(
-                    "Zotero rate-limited (HTTP {status}); waiting {wait}s before retrying…"
-                );
+                eprintln!("Zotero rate-limited (HTTP {status}); waiting {wait}s before retrying…");
                 thread::sleep(Duration::from_secs(wait));
                 attempt += 1;
                 continue;

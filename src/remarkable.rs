@@ -7,13 +7,11 @@ use reqwest::blocking::Client;
 
 use crate::config;
 
-const AUTH_HOST: &str = "https://webapp-prod.cloud.remarkable.engineering";
-const UPLOAD_HOST: &str = "https://internal.cloud.remarkable.com";
-
 /// Register this machine with the reMarkable cloud and store the device token.
 pub fn pair(code: &str) -> Result<()> {
+    let endpoints = config::remarkable_endpoints()?;
     let response = Client::new()
-        .post(format!("{AUTH_HOST}/token/json/2/device/new"))
+        .post(format!("{}/token/json/2/device/new", endpoints.auth_host))
         .bearer_auth("")
         .json(&serde_json::json!({
             "code": code,
@@ -26,25 +24,33 @@ pub fn pair(code: &str) -> Result<()> {
     let token = response.text()?;
     let path = config::device_token_path()?;
     fs::write(&path, &token)?;
-    println!("Paired with the reMarkable cloud (token stored in {}).", path.display());
+    println!(
+        "Paired with the reMarkable cloud (token stored in {}).",
+        path.display()
+    );
     Ok(())
 }
 
 pub struct Remarkable {
     client: Client,
     session_token: String,
+    upload_host: String,
 }
 
 impl Remarkable {
     /// Exchange the stored device token for a fresh session token.
     pub fn connect() -> Result<Self> {
+        let endpoints = config::remarkable_endpoints()?;
         let path = config::device_token_path()?;
         let device_token = fs::read_to_string(&path).with_context(|| {
-            format!("cannot read {} — run `zoterable pair <code>` first", path.display())
+            format!(
+                "cannot read {} — run `zoterable pair <code>` first",
+                path.display()
+            )
         })?;
         let client = Client::new();
         let session_token = client
-            .post(format!("{AUTH_HOST}/token/json/2/user/new"))
+            .post(format!("{}/token/json/2/user/new", endpoints.auth_host))
             .bearer_auth(device_token.trim())
             // The auth frontend rejects bodiless POSTs with 411 Length
             // Required; an empty body forces a Content-Length: 0 header.
@@ -53,7 +59,11 @@ impl Remarkable {
             .error_for_status()
             .context("could not refresh the reMarkable session token — try re-pairing")?
             .text()?;
-        Ok(Self { client, session_token })
+        Ok(Self {
+            client,
+            session_token,
+            upload_host: endpoints.upload_host,
+        })
     }
 
     /// Upload a PDF to the root folder of the reMarkable cloud.
@@ -63,7 +73,7 @@ impl Remarkable {
     pub fn upload_pdf(&self, visible_name: &str, bytes: Vec<u8>) -> Result<()> {
         let meta = BASE64.encode(serde_json::json!({ "file_name": visible_name }).to_string());
         self.client
-            .post(format!("{UPLOAD_HOST}/doc/v2/files"))
+            .post(format!("{}/doc/v2/files", self.upload_host))
             .bearer_auth(&self.session_token)
             .header("content-type", "application/pdf")
             .header("rm-meta", meta)

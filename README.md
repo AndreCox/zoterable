@@ -116,6 +116,15 @@ zotero_user_id = "1234567"
 zotero_api_key = "AbCdEfGh1234567890XyZ"
 ```
 
+If you use rmfakecloud (or another custom reMarkable backend), you can also set:
+
+```toml
+remarkable_auth_host = "https://your-auth-host"
+remarkable_upload_host = "https://your-upload-host"
+```
+
+If omitted, zoterable uses the official reMarkable endpoints.
+
 ### 2. Group libraries (optional)
 
 To also sync shared group libraries, add each group's numeric ID — the number in
